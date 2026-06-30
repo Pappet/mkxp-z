@@ -886,33 +886,64 @@ struct GraphicsPrivate {
         rtData->screenOffset = scOffset / backingScaleFactor;
     }
     
+    /* Whether internal display rotation is active */
+    bool screenRotationActive() const {
+        return threadData->config.screenRotation != 0;
+    }
+
+    /* Screen render resolution as it appears on the physical display, i.e. with
+     * width/height swapped for 90/270 degree rotations. scOffset and scSize
+     * always describe the on-screen bounding box of this (possibly rotated)
+     * content. */
+    Vec2i rotatedScRes() const {
+        int r = threadData->config.screenRotation;
+        if (r == 90 || r == 270)
+            return Vec2i(scRes.y, scRes.x);
+        return scRes;
+    }
+
+    /* Whether the final rotated present should use linear filtering */
+    bool rotatedPresentSmooth() const {
+        Vec2i rotRes = rotatedScRes();
+        if (rotRes == scSize)
+            return false;
+        int method = (scSize.x < rotRes.x || scSize.y < rotRes.y)
+            ? threadData->config.smoothScalingDown
+            : threadData->config.smoothScaling;
+        return method != NearestNeighbor;
+    }
+
     /* Enforces fixed aspect ratio, if desired */
     void recalculateScreenSize(bool fixedAspectRatio) {
         scSize = winSize;
-        
+
+        /* Use the on-screen (possibly rotated) resolution so the letterbox /
+         * integer-scale math fits the rotated image into the window */
+        const Vec2i rotRes = rotatedScRes();
+
         if (!fixedAspectRatio) {
             if (!integerScaleActive || (integerScaleActive && integerLastMileScaling)) {
                 scOffset = Vec2i(0, 0);
                 return;
             }
         }
-        
+
         if (integerScaleActive && !integerLastMileScaling) {
-            scOffset.x = ((winSize.x / 2) - (scRes.x / 2) * integerScaleFactor.x);
-            scOffset.y = ((winSize.y / 2) - (scRes.y / 2) * integerScaleFactor.y);
-            
-            scSize = Vec2i(scRes.x * integerScaleFactor.x, scRes.y * integerScaleFactor.y);
+            scOffset.x = ((winSize.x / 2) - (rotRes.x / 2) * integerScaleFactor.x);
+            scOffset.y = ((winSize.y / 2) - (rotRes.y / 2) * integerScaleFactor.y);
+
+            scSize = Vec2i(rotRes.x * integerScaleFactor.x, rotRes.y * integerScaleFactor.y);
             return;
         }
-        
-        float resRatio = (float)scRes.x / scRes.y;
+
+        float resRatio = (float)rotRes.x / rotRes.y;
         float winRatio = (float)winSize.x / winSize.y;
-        
+
         if (resRatio > winRatio)
             scSize.y = scSize.x / resRatio;
         else if (resRatio < winRatio)
             scSize.x = scSize.y * resRatio;
-        
+
         scOffset.x = (winSize.x - scSize.x) / 2.f;
         scOffset.y = (winSize.y - scSize.y) / 2.f;
     }
@@ -929,8 +960,9 @@ struct GraphicsPrivate {
     /* Returns whether a new scale was found */
     bool findHighestIntegerScale()
     {
-        Vec2i newScale(findHighestFittingScale(scRes.x, winSize.x),
-                       findHighestFittingScale(scRes.y, winSize.y));
+        const Vec2i rotRes = rotatedScRes();
+        Vec2i newScale(findHighestFittingScale(rotRes.x, winSize.x),
+                       findHighestFittingScale(rotRes.y, winSize.y));
         
         if (threadData->config.fixedAspectRatio)
         {
@@ -1042,9 +1074,77 @@ struct GraphicsPrivate {
                               !forceNearestNeighbor && GLMeta::smoothScalingMethod(scaleIsSpecial) == Bilinear);
     }
     
+    /* Final present for the rotated case: draw the source framebuffer to the
+     * window as a single textured quad whose corner positions are rotated by
+     * the configured angle. This bypasses the native framebuffer-blit path,
+     * which cannot rotate. scOffset/scSize describe the rotated bounding box
+     * inside the window. */
+    void blitRotatedToScreen(TEXFBO &source, const Vec2i &sourceSize, bool smooth) {
+        FBO::unbind();
+        glState.viewport.pushSet(IntRect(0, 0, winSize.x, winSize.y));
+
+        FBO::clear();
+
+        SimpleShader &shader = shState->shaders().simple;
+        shader.bind();
+        shader.applyViewportProj();
+        shader.setTexSize(sourceSize);
+        shader.setTranslation(Vec2i());
+
+        TEX::bind(source.tex);
+        TEX::setSmooth(smooth);
+
+        /* Destination box corners in GL (y-up) window pixel space.
+         * Order is top-down: 0=TL, 1=TR, 2=BR, 3=BL */
+        const float ox = scOffset.x, oy = scOffset.y;
+        const float dw = scSize.x, dh = scSize.y;
+        const float wh = winSize.y;
+        const Vec2 boxCorner[4] = {
+            Vec2(ox,      wh - oy),
+            Vec2(ox + dw, wh - oy),
+            Vec2(ox + dw, wh - (oy + dh)),
+            Vec2(ox,      wh - (oy + dh))
+        };
+
+        /* Source texture corners in the same TL/TR/BR/BL order */
+        const Vec2 texCorner[4] = {
+            Vec2(0,             0),
+            Vec2(sourceSize.x,  0),
+            Vec2(sourceSize.x,  sourceSize.y),
+            Vec2(0,             sourceSize.y)
+        };
+
+        /* Rotating the image clockwise by 90*k means source corner i is drawn
+         * at destination corner (i + k) (mod 4). */
+        const int k = threadData->config.screenRotation / 90;
+
+        Quad &quad = shState->gpQuad();
+        for (int i = 0; i < 4; ++i) {
+            quad.vert[i].texPos = texCorner[i];
+            quad.vert[i].pos = boxCorner[(i + k) % 4];
+        }
+        quad.vboDirty = true;
+
+        glState.blend.pushSet(false);
+        quad.draw();
+        glState.blend.pop();
+
+        TEX::setSmooth(false);
+
+        glState.viewport.pop();
+    }
+
     void redrawScreen() {
         screen.composite();
-        
+
+        if (screenRotationActive()) {
+            blitRotatedToScreen(screen.getPP().frontBuffer(), scRes,
+                                rotatedPresentSmooth());
+            swapGLBuffer();
+            updateAvgFPS();
+            return;
+        }
+
         // maybe unspaghetti this later
         if (integerScaleStepApplicable() && !integerLastMileScaling)
         {
@@ -1329,18 +1429,22 @@ void Graphics::transition(int duration, const char *filename, int vague) {
         p->screenQuad.draw();
         
         p->checkResize();
-        
-        /* Then blit it flipped and scaled to the screen */
-        FBO::unbind();
-        FBO::clear();
-        
-        int scaleIsSpecial = GLMeta::blitScaleIsSpecial(p->integerScaleBuffer, false, IntRect(0, 0, p->scSize.x, p->scSize.y), transBuffer, IntRect(0, 0, p->scRes.x, p->scRes.y));
 
-        GLMeta::blitBeginScreen(Vec2i(p->winSize), scaleIsSpecial);
-        GLMeta::blitSource(transBuffer, scaleIsSpecial);
-        p->metaBlitBufferFlippedScaled(scaleIsSpecial);
-        GLMeta::blitEnd();
-        
+        /* Then blit it flipped and scaled to the screen */
+        if (p->screenRotationActive()) {
+            p->blitRotatedToScreen(transBuffer, p->scRes, p->rotatedPresentSmooth());
+        } else {
+            FBO::unbind();
+            FBO::clear();
+
+            int scaleIsSpecial = GLMeta::blitScaleIsSpecial(p->integerScaleBuffer, false, IntRect(0, 0, p->scSize.x, p->scSize.y), transBuffer, IntRect(0, 0, p->scRes.x, p->scRes.y));
+
+            GLMeta::blitBeginScreen(Vec2i(p->winSize), scaleIsSpecial);
+            GLMeta::blitSource(transBuffer, scaleIsSpecial);
+            p->metaBlitBufferFlippedScaled(scaleIsSpecial);
+            GLMeta::blitEnd();
+        }
+
         p->swapGLBuffer();
         /* Call this manually, as redrawScreen() is not called during this loop. */
         p->updateAvgFPS();
@@ -1393,18 +1497,22 @@ void Graphics::fadeout(int duration) {
     
     for (int i = duration - 1; i > -1; --i) {
         setBrightness(diff + (curr / duration) * i);
-        
-        if (p->frozen) {
-            int scaleIsSpecial = GLMeta::blitScaleIsSpecial(p->integerScaleBuffer, false, IntRect(0, 0, p->scSize.x, p->scSize.y), p->frozenScene, IntRect(0, 0, p->scRes.x, p->scRes.y));
 
-            GLMeta::blitBeginScreen(p->scSize, scaleIsSpecial);
-            GLMeta::blitSource(p->frozenScene, scaleIsSpecial);
-            
-            FBO::clear();
-            p->metaBlitBufferFlippedScaled(scaleIsSpecial);
-            
-            GLMeta::blitEnd();
-            
+        if (p->frozen) {
+            if (p->screenRotationActive()) {
+                p->blitRotatedToScreen(p->frozenScene, p->scRes, p->rotatedPresentSmooth());
+            } else {
+                int scaleIsSpecial = GLMeta::blitScaleIsSpecial(p->integerScaleBuffer, false, IntRect(0, 0, p->scSize.x, p->scSize.y), p->frozenScene, IntRect(0, 0, p->scRes.x, p->scRes.y));
+
+                GLMeta::blitBeginScreen(p->scSize, scaleIsSpecial);
+                GLMeta::blitSource(p->frozenScene, scaleIsSpecial);
+
+                FBO::clear();
+                p->metaBlitBufferFlippedScaled(scaleIsSpecial);
+
+                GLMeta::blitEnd();
+            }
+
             p->swapGLBuffer();
         } else {
             update();
@@ -1420,18 +1528,22 @@ void Graphics::fadein(int duration) {
     
     for (int i = 1; i <= duration; ++i) {
         setBrightness(curr + (diff / duration) * i);
-        
-        if (p->frozen) {
-            int scaleIsSpecial = GLMeta::blitScaleIsSpecial(p->integerScaleBuffer, false, IntRect(0, 0, p->scSize.x, p->scSize.y), p->frozenScene, IntRect(0, 0, p->scRes.x, p->scRes.y));
 
-            GLMeta::blitBeginScreen(p->scSize, scaleIsSpecial);
-            GLMeta::blitSource(p->frozenScene, scaleIsSpecial);
-            
-            FBO::clear();
-            p->metaBlitBufferFlippedScaled(scaleIsSpecial);
-            
-            GLMeta::blitEnd();
-            
+        if (p->frozen) {
+            if (p->screenRotationActive()) {
+                p->blitRotatedToScreen(p->frozenScene, p->scRes, p->rotatedPresentSmooth());
+            } else {
+                int scaleIsSpecial = GLMeta::blitScaleIsSpecial(p->integerScaleBuffer, false, IntRect(0, 0, p->scSize.x, p->scSize.y), p->frozenScene, IntRect(0, 0, p->scRes.x, p->scRes.y));
+
+                GLMeta::blitBeginScreen(p->scSize, scaleIsSpecial);
+                GLMeta::blitSource(p->frozenScene, scaleIsSpecial);
+
+                FBO::clear();
+                p->metaBlitBufferFlippedScaled(scaleIsSpecial);
+
+                GLMeta::blitEnd();
+            }
+
             p->swapGLBuffer();
         } else {
             update();
@@ -1485,6 +1597,30 @@ int Graphics::displayHeight() const {
     SDL_DisplayMode dm{};
     SDL_GetCurrentDisplayMode(SDL_GetWindowDisplayIndex(shState->sdlWindow()), &dm);
     return dm.h / p->backingScaleFactor;
+}
+
+void Graphics::mapWindowPosToGame(int winX, int winY, int &gameX, int &gameY) const {
+    /* Convert logical window units to drawable pixels, which is the space
+     * scOffset/scSize live in */
+    float px = winX * p->backingScaleFactor;
+    float py = winY * p->backingScaleFactor;
+
+    /* Normalized position inside the on-screen (rotated) bounding box */
+    float bx = (px - p->scOffset.x) / (float)p->scSize.x;
+    float by = (py - p->scOffset.y) / (float)p->scSize.y;
+
+    /* Inverse of the rotation applied to the image, mapping back into
+     * normalized game-screen coordinates */
+    float sx, sy;
+    switch (p->threadData->config.screenRotation) {
+    case 90:  sx = by;       sy = 1.f - bx; break;
+    case 180: sx = 1.f - bx; sy = 1.f - by; break;
+    case 270: sx = 1.f - by; sy = bx;       break;
+    default:  sx = bx;       sy = by;       break;
+    }
+
+    gameX = (int)std::floor(sx * p->scResLores.x);
+    gameY = (int)std::floor(sy * p->scResLores.y);
 }
 
 void Graphics::resizeScreen(int width, int height) {
@@ -1742,25 +1878,44 @@ void Graphics::repaintWait(const AtomicFlag &exitCond, bool checkReset) {
     /* Repaint the screen with the last good frame we drew */
     TEXFBO &lastFrame = p->screen.getPP().frontBuffer();
 
+    if (p->screenRotationActive()) {
+        bool smooth = p->rotatedPresentSmooth();
+
+        while (!exitCond) {
+            shState->checkShutdown();
+
+            if (checkReset)
+                shState->checkReset();
+
+            p->blitRotatedToScreen(lastFrame, p->scRes, smooth);
+            SDL_GL_SwapWindow(p->threadData->window);
+            p->fpsLimiter.delay();
+
+            p->threadData->ethread->notifyFrame();
+        }
+
+        return;
+    }
+
     int scaleIsSpecial = GLMeta::blitScaleIsSpecial(p->integerScaleBuffer, false, IntRect(0, 0, p->scSize.x, p->scSize.y), lastFrame, IntRect(0, 0, p->scRes.x, p->scRes.y));
 
     GLMeta::blitBeginScreen(p->winSize, scaleIsSpecial);
     GLMeta::blitSource(lastFrame, scaleIsSpecial);
-    
+
     while (!exitCond) {
         shState->checkShutdown();
-        
+
         if (checkReset)
             shState->checkReset();
-        
+
         FBO::clear();
         p->metaBlitBufferFlippedScaled(scaleIsSpecial);
         SDL_GL_SwapWindow(p->threadData->window);
         p->fpsLimiter.delay();
-        
+
         p->threadData->ethread->notifyFrame();
     }
-    
+
     GLMeta::blitEnd();
 }
 

@@ -43,6 +43,8 @@ struct Config {
     bool winResizable;
     bool fullscreen;
     bool fixedAspectRatio;
+    /* Final-present rotation in degrees clockwise. Allowed: 0, 90, 180, 270 */
+    int screenRotation;
     int smoothScaling;
     int smoothScalingDown;
     int bitmapSmoothScaling;

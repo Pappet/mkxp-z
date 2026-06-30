@@ -65,6 +65,11 @@ public:
     int displayContentHeight() const;
     int displayWidth() const;
     int displayHeight() const;
+    /* Maps a window pixel position (as reported by SDL, in logical window
+     * units) to game-screen coordinates, accounting for letterboxing and the
+     * configured screenRotation. Used to keep pointer input aligned with the
+     * rotated image. */
+    void mapWindowPosToGame(int winX, int winY, int &gameX, int &gameY) const;
 	void resizeScreen(int width, int height);
     void resizeWindow(int width, int height, bool center=false);
 	void drawMovieFrame(const THEORAPLAY_VideoFrame* video, Bitmap *videoBitmap);

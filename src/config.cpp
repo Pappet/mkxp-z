@@ -134,6 +134,7 @@ void Config::read(int argc, char *argv[]) {
         {"winResizable", true},
         {"fullscreen", false},
         {"fixedAspectRatio", true},
+        {"screenRotation", 0},
         {"smoothScaling", 0},
         {"smoothScalingDown", 0},
         {"bitmapSmoothScaling", 0},
@@ -278,6 +279,7 @@ try { exp } catch (...) {}
     SET_OPT(printFPS, boolean);
     SET_OPT(fullscreen, boolean);
     SET_OPT(fixedAspectRatio, boolean);
+    SET_OPT(screenRotation, integer);
     SET_OPT(smoothScaling, integer);
     SET_OPT(smoothScalingDown, integer);
     SET_OPT(bitmapSmoothScaling, integer);
@@ -366,7 +368,25 @@ try { exp } catch (...) {}
     // The config is re-read after the window is already created, so some entries
     // may not take effect
     manualFolderSelect = getEnvironmentBool("MKXPZ_FOLDER_SELECT", false);
-    
+
+    // Internal display rotation. Environment variable takes priority over the
+    // json setting, so the same game copy can be launched in different
+    // orientations (e.g. from a handheld PortMaster script) without editing
+    // mkxp.json.
+    {
+        const char *rotEnv = SDL_getenv("MKXPZ_SCREEN_ROTATION");
+        if (rotEnv)
+            screenRotation = SDL_atoi(rotEnv);
+    }
+    // Normalize to a positive multiple of 90 and reject unsupported angles.
+    screenRotation = ((screenRotation % 360) + 360) % 360;
+    if (screenRotation != 0 && screenRotation != 90 &&
+        screenRotation != 180 && screenRotation != 270)
+    {
+        Debug() << "Invalid screenRotation, falling back to 0";
+        screenRotation = 0;
+    }
+
     raw = optsJ;
 }
 

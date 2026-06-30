@@ -77,6 +77,24 @@
     // "fixedAspectRatio": true,
 
 
+    // Rotate the final image clockwise by the given number
+    // of degrees when presenting it to the window. This is an
+    // internal, OS-independent rotation applied only to the last
+    // blit, so all game logic, mouse/touch input and rendering
+    // stay in the game's native orientation. Useful for running
+    // landscape games on portrait handheld panels (and vice versa).
+    // Mouse coordinates are transformed to match. The aspect-ratio
+    // fit (see fixedAspectRatio) uses the rotated dimensions, so a
+    // landscape game rotated onto a portrait display is letterboxed
+    // correctly.
+    // Allowed values: 0, 90, 180, 270
+    // Can be overridden with the MKXPZ_SCREEN_ROTATION environment
+    // variable (handy for per-device launch scripts).
+    // (default: 0)
+    //
+    // "screenRotation": 90,
+
+
     // Apply smooth interpolation when game screen
     // is upscaled
     // 0: Nearest-Neighbor
