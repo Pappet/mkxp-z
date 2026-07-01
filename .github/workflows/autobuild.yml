@@ -70,6 +70,10 @@ jobs:
           cmake --version
           meson --version
           
+      - name: Remove broken focal rubygems OS overlay
+        run: |
+          rm -f /usr/lib/ruby/vendor_ruby/rubygems/defaults/operating_system.rb
+          
       - name: Install apt dependencies
         run: |
           dpkg --add-architecture ${{matrix.arch_debian}}
