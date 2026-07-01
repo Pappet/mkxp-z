@@ -22,6 +22,7 @@
 #include "input.h"
 #include "config.h"
 #include "sharedstate.h"
+#include "graphics.h"
 #include "eventthread.h"
 #include "input/keybindings.h"
 #include "util/exception.h"
@@ -1445,6 +1446,12 @@ int Input::mouseX()
 {
     RGSSThreadData &rtData = shState->rtData();
 
+    if (shState->config().screenRotation != 0) {
+        int gx, gy;
+        shState->graphics().mapWindowPosToGame(p->mousePos[0], p->mousePos[1], gx, gy);
+        return gx;
+    }
+
     int hiresResult = (p->mousePos[0] - rtData.screenOffset.x) * rtData.sizeResoRatio.x;
 
     if (shState->config().enableHires) {
@@ -1458,6 +1465,12 @@ int Input::mouseX()
 int Input::mouseY()
 {
     RGSSThreadData &rtData = shState->rtData();
+
+    if (shState->config().screenRotation != 0) {
+        int gx, gy;
+        shState->graphics().mapWindowPosToGame(p->mousePos[0], p->mousePos[1], gx, gy);
+        return gy;
+    }
 
     int hiresResult = (p->mousePos[1] - rtData.screenOffset.y) * rtData.sizeResoRatio.y;
 
