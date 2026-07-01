@@ -10,6 +10,94 @@ on:
   workflow_dispatch:
 
 jobs:
+  build-linux-cross-bullseye:
+    name: Debian Bullseye ${{matrix.arch_mkxpz}} (low-glibc)
+    runs-on: ubuntu-22.04
+    container: debian:bullseye
+    defaults:
+      run:
+        shell: bash
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch_mkxpz: arm64
+            arch_debian: arm64
+            arch_gcc: aarch64-linux-gnu
+            experimental: false
+    steps:
+      - uses: benjlevesque/short-sha@v2.2
+        id: short-sha
+        with:
+          length: 7
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            linux/build-${{matrix.arch_mkxpz}}
+            linux/downloads
+          key: lin-bullseye-v1-${{matrix.arch_mkxpz}}-${{ hashFiles('linux/Makefile', 'linux/target*', 'linux/toolchain*') }}
+
+      - name: Install newer CMake (bullseye workaround)
+        run: |
+          apt update
+          apt install -y ca-certificates gpg wget
+          # Bullseye's CMake is 3.18 -> too old for dbus' file(CHMOD) (needs 3.19+).
+          # Pull a current CMake from the Kitware repo.
+          wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null \
+            | gpg --dearmor - | tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ focal main' \
+            | tee /etc/apt/sources.list.d/kitware.list >/dev/null || true
+          # Kitware doesn't ship a bullseye/debian repo; use pip for a modern cmake+meson instead.
+          apt install -y python3 python3-pip
+          pip3 install --upgrade 'cmake>=3.25' 'meson>=0.63.0' ninja
+          hash -r
+          cmake --version
+          meson --version
+
+      - name: Install apt dependencies
+        run: |
+          dpkg --add-architecture ${{matrix.arch_debian}}
+          apt update
+          apt install git wget build-essential autoconf automake libtool pkg-config ruby bison xxd -y
+          apt install libfontenc-dev:${{matrix.arch_debian}} libfs-dev:${{matrix.arch_debian}} libice-dev:${{matrix.arch_debian}} libsm-dev:${{matrix.arch_debian}} libx11-dev:${{matrix.arch_debian}} libxau-dev:${{matrix.arch_debian}} libxaw7-dev:${{matrix.arch_debian}} libxcomposite-dev:${{matrix.arch_debian}} libxcursor-dev:${{matrix.arch_debian}} libxdamage-dev:${{matrix.arch_debian}} libxdmcp-dev:${{matrix.arch_debian}} libxext-dev:${{matrix.arch_debian}} libxfixes-dev:${{matrix.arch_debian}} libxfont-dev:${{matrix.arch_debian}} libxft-dev:${{matrix.arch_debian}} libxi-dev:${{matrix.arch_debian}} libxinerama-dev:${{matrix.arch_debian}} libxkbfile-dev:${{matrix.arch_debian}} libxmu-dev:${{matrix.arch_debian}} libxmuu-dev:${{matrix.arch_debian}} libxpm-dev:${{matrix.arch_debian}} libxrandr-dev:${{matrix.arch_debian}} libxrender-dev:${{matrix.arch_debian}} libxres-dev:${{matrix.arch_debian}} libxss-dev:${{matrix.arch_debian}} libxt-dev:${{matrix.arch_debian}} libxtst-dev:${{matrix.arch_debian}} libxv-dev:${{matrix.arch_debian}} libxvmc-dev:${{matrix.arch_debian}} libxxf86dga-dev:${{matrix.arch_debian}} libxxf86vm-dev:${{matrix.arch_debian}} x11proto-dev:${{matrix.arch_debian}} xserver-xorg-dev:${{matrix.arch_debian}} xtrans-dev:${{matrix.arch_debian}} -y
+          apt install gcc-${{matrix.arch_gcc}} g++-${{matrix.arch_gcc}} zlib1g-dev:${{matrix.arch_debian}} libbz2-dev:${{matrix.arch_debian}} libgl1-mesa-dev:${{matrix.arch_debian}} libasound2-dev:${{matrix.arch_debian}} libpulse-dev:${{matrix.arch_debian}} -y
+
+      - name: Build everything else
+        run: |
+          cd linux
+          source target-${{matrix.arch_mkxpz}}.sh
+          make
+
+      - name: Build executable
+        run: |
+          source linux/target-${{matrix.arch_mkxpz}}.sh
+          source linux/vars.sh
+          meson setup --cross-file linux/$ARCH_MESON_TOOLCHAIN build --bindir=. --prefix=$GITHUB_WORKSPACE/build/local
+          cd build
+          ninja
+          ninja install
+          cp "$MKXPZ_PREFIX/lib/$("$ARCH_CONFIGURE-objdump" -p local/mkxp-z* | grep -i NEEDED | grep -Eo 'libruby.so.[0-9\.]+')" local/lib*/
+          cp "/usr/lib/$ARCH_CONFIGURE/$("$ARCH_CONFIGURE-objdump" -p local/lib*/libruby.so* | grep -i NEEDED | grep -Eo 'libcrypt.so.[0-9\.]+')" local/lib*/
+
+      - name: Prepare archive
+        run: |
+          cd build/local
+          cp -r ../../linux/build-${{matrix.arch_mkxpz}}/lib/ruby/3.1.0 .
+          mv ./3.1.0 ./stdlib
+          cp ../../mkxp.json .
+          cp -r ../../scripts .
+          cp ../../assets/LICENSE.mkxp-z-with-https.txt .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mkxp-z.linux.debian.bullseye.${{matrix.arch_mkxpz}}.${{github.event_name == 'pull_request' && format('PR{0}', github.event.number) || github.ref_name}}-${{steps.short-sha.outputs.sha}}
+          path: build/local
+          
   build-linux-cross-focal:
     name: Ubuntu 20.04 ${{matrix.arch_mkxpz}} (low-glibc)
     runs-on: ubuntu-22.04
@@ -53,8 +141,8 @@ jobs:
           path: |
             linux/build-${{matrix.arch_mkxpz}}
             linux/downloads
-          key: lin-focal-${{matrix.arch_mkxpz}}-${{ hashFiles('linux/Makefile', 'linux/target*', 'linux/toolchain*') }}
-      
+          key: lin-focal-v2-${{matrix.arch_mkxpz}}-${{ hashFiles('linux/Makefile', 'linux/target*', 'linux/toolchain*') }}
+
       - name: Install newer CMake and Meson (focal workaround)
         run: |
           apt install -y ca-certificates gpg wget python3 python3-pip
@@ -67,13 +155,10 @@ jobs:
           apt install -y cmake
           # Meson via pip, focal's apt-Meson ist ebenfalls zu alt
           pip3 install --upgrade 'meson>=0.63.0' ninja
+          hash -r
           cmake --version
           meson --version
-          
-      - name: Remove broken focal rubygems OS overlay
-        run: |
-          rm -f /usr/lib/ruby/vendor_ruby/rubygems/defaults/operating_system.rb
-          
+
       - name: Install apt dependencies
         run: |
           dpkg --add-architecture ${{matrix.arch_debian}}
@@ -85,6 +170,10 @@ jobs:
           apt install wget build-essential autoconf automake libtool pkg-config ruby bison xxd -y
           apt install libfontenc-dev:${{matrix.arch_debian}} libfs-dev:${{matrix.arch_debian}} libice-dev:${{matrix.arch_debian}} libsm-dev:${{matrix.arch_debian}} libx11-dev:${{matrix.arch_debian}} libxau-dev:${{matrix.arch_debian}} libxaw7-dev:${{matrix.arch_debian}} libxcomposite-dev:${{matrix.arch_debian}} libxcursor-dev:${{matrix.arch_debian}} libxdamage-dev:${{matrix.arch_debian}} libxdmcp-dev:${{matrix.arch_debian}} libxext-dev:${{matrix.arch_debian}} libxfixes-dev:${{matrix.arch_debian}} libxfont-dev:${{matrix.arch_debian}} libxft-dev:${{matrix.arch_debian}} libxi-dev:${{matrix.arch_debian}} libxinerama-dev:${{matrix.arch_debian}} libxkbfile-dev:${{matrix.arch_debian}} libxmu-dev:${{matrix.arch_debian}} libxmuu-dev:${{matrix.arch_debian}} libxpm-dev:${{matrix.arch_debian}} libxrandr-dev:${{matrix.arch_debian}} libxrender-dev:${{matrix.arch_debian}} libxres-dev:${{matrix.arch_debian}} libxss-dev:${{matrix.arch_debian}} libxt-dev:${{matrix.arch_debian}} libxtst-dev:${{matrix.arch_debian}} libxv-dev:${{matrix.arch_debian}} libxvmc-dev:${{matrix.arch_debian}} libxxf86dga-dev:${{matrix.arch_debian}} libxxf86vm-dev:${{matrix.arch_debian}} x11proto-dev:${{matrix.arch_debian}} xserver-xorg-dev:${{matrix.arch_debian}} xtrans-dev:${{matrix.arch_debian}} -y
           apt install gcc-${{matrix.arch_gcc}} g++-${{matrix.arch_gcc}} zlib1g-dev:${{matrix.arch_debian}} libbz2-dev:${{matrix.arch_debian}} libgl1-mesa-dev:${{matrix.arch_debian}} libasound2-dev:${{matrix.arch_debian}} libpulse-dev:${{matrix.arch_debian}} -y
+          # WICHTIG: erst NACH der ruby-Installation die kaputte OS-RubyGems-Overlay-Datei
+          # entfernen (sie verursacht den `rubyforge_project=`-Fehler beim Ruby-Install).
+          # Vorher wäre zwecklos, weil `apt install ruby` sie neu anlegt.
+          rm -f /usr/lib/ruby/vendor_ruby/rubygems/defaults/operating_system.rb
 
       - name: Build everything else
         run: |
